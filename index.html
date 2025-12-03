@@ -1,0 +1,463 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Agent Virtual Office</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: 'Courier New', monospace; }
+        canvas { display: block; }
+        .ui-panel {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 350px;
+            max-height: 90vh;
+            background: rgba(0, 0, 0, 0.85);
+            border: 1px solid #333;
+            border-radius: 8px;
+            color: #00ff00;
+            padding: 15px;
+            overflow-y: auto;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.1);
+            z-index: 10;
+        }
+        .log-entry { margin-bottom: 8px; border-bottom: 1px solid #333; padding-bottom: 4px; font-size: 12px; }
+        .log-entry.feat { color: #60a5fa; } /* Blue */
+        .log-entry.param { color: #facc15; } /* Yellow */
+        .log-entry.leak { color: #f87171; } /* Red */
+        
+        .final-json {
+            margin-top: 20px;
+            background: #111;
+            padding: 10px;
+            border: 1px solid #555;
+            white-space: pre-wrap;
+            font-size: 11px;
+            color: #fff;
+        }
+
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- UI Overlay -->
+    <div class="ui-panel" id="consolePanel">
+        <h2 class="text-xl font-bold mb-4 border-b border-green-500 pb-2">Virtual Workspace</h2>
+        Best model:
+        <div id="finalOutput" class="final-json">{
+    "R2_Score": 0.0006573526471036484,
+    "Directional_Accuracy": 0.5372750642673522,
+    "MAPE": 1.3296687011623483,
+    "MAPE_Accuracy": -0.32966870116234814
+}<br/>
+<img src="./model_performance_dashboard_latest.png"/>
+</div>
+        <br>
+        Logs:
+        <div id="logs"></div>
+    </div>
+
+    <canvas id="officeCanvas"></canvas>
+
+<script>
+    /**
+     * CONFIGURATION & CONSTANTS
+     */
+    const canvas = document.getElementById('officeCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    // Office Layout
+    let width, height;
+    const TILE_SIZE = 40;
+    
+    // Zones
+    const ZONES = {
+        SERVER_ROOM: { x: 100, y: 100, w: 120, h: 100, label: "Data Lake" },
+        MEETING_ROOM: { x: 400, y: 300, w: 150, h: 150, label: "Meeting Area" },
+        DESK_SCIENTIST: { x: 100, y: 450, w: 80, h: 60, label: "Feat. Eng." },
+        DESK_PARAM: { x: 300, y: 500, w: 80, h: 60, label: "Tuning" },
+        DESK_LEAKAGE: { x: 600, y: 450, w: 80, h: 60, label: "Audit" },
+        WORST_RESULTS: { x: 300, y: 100, w: 150, h: 100, label: "Rejected Models" },
+        BEST_RESULTS: { x: 550, y: 100, w: 150, h: 100, label: "Approved Models" },
+    };
+
+    // Agent Definitions
+    const AGENTS = [
+        { 
+            id: 'scientist', 
+            name: 'Lead AI Data Scientist', 
+            color: '#60a5fa', 
+            home: { x: 140, y: 480 },
+            role: 'feat' 
+        },
+        { 
+            id: 'param', 
+            name: 'Hyperparameter Tuning Specialist', 
+            color: '#facc15', 
+            home: { x: 340, y: 530 },
+            role: 'param'
+        },
+        { 
+            id: 'leakage', 
+            name: 'Data Leakage & QA Auditor', 
+            color: '#f87171', 
+            home: { x: 640, y: 480 },
+            role: 'leak'
+        }
+    ];
+
+    // State
+    let agents = [];
+    let particles = [];
+    let isRunning = false;
+    let frame = 0;
+
+    /**
+     * CLASSES
+     */
+    class Agent {
+        constructor(config) {
+            this.id = config.id;
+            this.name = config.name;
+            this.color = config.color;
+            this.x = config.home.x;
+            this.y = config.home.y;
+            this.targetX = config.home.x;
+            this.targetY = config.home.y;
+            this.speed = 2.5;
+            this.state = 'IDLE'; // IDLE, MOVING, WORKING, TALKING
+            this.role = config.role;
+            this.speech = null;
+            this.speechTimer = 0;
+        }
+
+        moveTo(x, y) {
+            this.targetX = x;
+            this.targetY = y;
+            this.state = 'MOVING';
+        }
+
+        say(text) {
+            this.speech = text;
+            this.speechTimer = 180; // frames
+            addLog(this.name, text, this.role);
+        }
+
+        update() {
+            // Movement Logic
+            const dx = this.targetX - this.x;
+            const dy = this.targetY - this.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+
+            if (dist > this.speed) {
+                this.x += (dx / dist) * this.speed;
+                this.y += (dy / dist) * this.speed;
+            } else {
+                this.x = this.targetX;
+                this.y = this.targetY;
+                if (this.state === 'MOVING') this.state = 'IDLE';
+            }
+
+            // Speech Bubble Timer
+            if (this.speechTimer > 0) {
+                this.speechTimer--;
+            } else {
+                this.speech = null;
+            }
+        }
+
+        draw(ctx) {
+            // Body
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, 12, 0, Math.PI * 2);
+            ctx.fillStyle = this.color;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Name
+            ctx.fillStyle = '#fff';
+            ctx.font = '12px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText(this.name, this.x, this.y + 25);
+
+            // Speech Bubble
+            if (this.speech) {
+                ctx.fillStyle = 'white';
+                const width = ctx.measureText(this.speech).width + 20;
+                ctx.fillRect(this.x - width/2, this.y - 45, width, 25);
+                ctx.strokeRect(this.x - width/2, this.y - 45, width, 25);
+
+                
+                ctx.fillStyle = 'black';
+                ctx.fillText(this.speech, this.x, this.y - 30);
+                
+                // Little triangle
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y - 20);
+                ctx.lineTo(this.x - 5, this.y - 12);
+                ctx.lineTo(this.x + 5, this.y - 12);
+                ctx.fill();
+            }
+        }
+    }
+
+    class Particle {
+        constructor(x, y, color) {
+            this.x = x;
+            this.y = y;
+            this.color = color;
+            this.life = 1.0;
+            this.vx = (Math.random() - 0.5) * 2;
+            this.vy = (Math.random() - 0.5) * 2;
+        }
+        update() {
+            this.x += this.vx;
+            this.y += this.vy;
+            this.life -= 0.02;
+        }
+        draw(ctx) {
+            ctx.globalAlpha = this.life;
+            ctx.fillStyle = this.color;
+            ctx.fillRect(this.x, this.y, 3, 3);
+            ctx.globalAlpha = 1.0;
+        }
+    }
+
+    /**
+     * INITIALIZATION
+     */
+    function init() {
+        resize();
+        window.addEventListener('resize', resize);
+        
+        // Create Agents
+        AGENTS.forEach(cfg => {
+            agents.push(new Agent(cfg));
+        });
+
+        requestAnimationFrame(loop);
+        startSimulation()
+    }
+
+    function resize() {
+        width = window.innerWidth;
+        height = window.innerHeight;
+        canvas.width = width;
+        canvas.height = height;
+    }
+
+    function addLog(agentName, text, type) {
+        const logPanel = document.getElementById('logs');
+        const entry = document.createElement('div');
+        entry.className = `log-entry ${type}`;
+        entry.innerHTML = `<strong>${agentName}:</strong> ${text}`;
+        logPanel.appendChild(entry);
+        logPanel.scrollTop = logPanel.scrollHeight;
+    }
+
+    /**
+     * SIMULATION SCRIPT (Mocks what CrewAI would do)
+     */
+    async function startSimulation() {
+        if (isRunning) return;
+        isRunning = true;
+        document.getElementById('logs').innerHTML = '';
+        // document.getElementById('finalOutput').style.display = 'none';
+
+        const scientist = agents.find(a => a.id === 'scientist');
+        const param = agents.find(a => a.id === 'param');
+        const leak = agents.find(a => a.id === 'leakage');
+
+        setInterval(() => {
+            scientist.say("Walking around...");
+            scientist.moveTo(Math.random() * (width - 100) + 50, Math.random() * (height - 100) + 50);
+        }, Math.random() * 10000 + 1000);
+
+        setInterval(() => {
+            param.say("Walking around...");
+            param.moveTo(Math.random() * (width - 100) + 50, Math.random() * (height - 100) + 50);
+        }, Math.random() * 10000 + 2000);
+
+        setInterval(() => {
+            leak.say("Walking around...");
+            leak.moveTo(Math.random() * (width - 100) + 50, Math.random() * (height - 100) + 50);
+        }, Math.random() * 10000 + 3000);
+
+        // // --- PHASE 1: Data Scientist retrieves data ---
+        // scientist.say("Heading to the Data Lake...");
+        // scientist.moveTo(ZONES.SERVER_ROOM.x + 60, ZONES.SERVER_ROOM.y + 50);
+        // await wait(2000);
+        
+        // scientist.say("Downloading dataset...");
+        // spawnParticles(scientist.x, scientist.y, '#00ff00', 20);
+        // await wait(2000);
+
+        // scientist.say("Analyzing correlations...");
+        // await wait(1500);
+        
+        // scientist.moveTo(ZONES.DESK_SCIENTIST.x + 40, ZONES.DESK_SCIENTIST.y + 30);
+        // await wait(2000);
+        // scientist.say("I've selected 'tenure' and 'monthly_charges'.");
+        
+        // // --- PHASE 2: Meeting for Handoff ---
+        // scientist.moveTo(ZONES.MEETING_ROOM.x + 30, ZONES.MEETING_ROOM.y + 75);
+        // param.moveTo(ZONES.MEETING_ROOM.x + 120, ZONES.MEETING_ROOM.y + 75);
+        // await wait(2500);
+
+        // scientist.say("Here are the features.");
+        // await wait(1500);
+        // param.say("Thanks. I'll tune an XGBoost model.");
+        // await wait(1500);
+
+        // // --- PHASE 3: Parameter Tuning ---
+        // scientist.moveTo(scientist.targetX, 480); // Go back roughly
+        // param.moveTo(ZONES.DESK_PARAM.x + 40, ZONES.DESK_PARAM.y + 30);
+        // await wait(2000);
+
+        // param.say("Grid searching learning rate...");
+        // spawnParticles(param.x, param.y, '#ffff00', 30);
+        // await wait(1000);
+        // param.say("Testing depth = 6...");
+        // await wait(1000);
+        // param.say("Found optimal params.");
+
+        // // --- PHASE 4: Leakage Audit ---
+        // param.moveTo(ZONES.DESK_LEAKAGE.x - 20, ZONES.DESK_LEAKAGE.y + 30);
+        // leak.moveTo(ZONES.DESK_LEAKAGE.x + 40, ZONES.DESK_LEAKAGE.y + 30);
+        // await wait(2500);
+
+        // param.say("Review this config?");
+        // await wait(1000);
+        // leak.say("Checking for target leakage...");
+        // spawnParticles(leak.x, leak.y, '#ff0000', 20);
+        // await wait(2000);
+        // leak.say("Looks clean. Approving.");
+
+        // // --- PHASE 5: Output ---
+        // const finalJson = {
+        //     "model_type": "XGBoost",
+        //     "features": ["tenure", "monthly_charges", "payment_method"],
+        //     "parameters": {
+        //         "learning_rate": 0.05,
+        //         "max_depth": 6,
+        //         "n_estimators": 500
+        //     },
+        //     "audit_passed": true
+        // };
+
+        // const out = document.getElementById('finalOutput');
+        // out.innerText = JSON.stringify(finalJson, null, 2);
+        // out.style.display = 'block';
+        
+        // leak.say("Epoch Complete.");
+        // isRunning = false;
+    }
+
+    function wait(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
+    function spawnParticles(x, y, color, count) {
+        for(let i=0; i<count; i++) {
+            particles.push(new Particle(x, y, color));
+        }
+    }
+
+    /**
+     * MAIN LOOP
+     */
+    function loop() {
+        // Clear
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillRect(0, 0, width, height);
+
+        // Draw Floor Grid
+        ctx.strokeStyle = '#2a2a2a';
+        ctx.lineWidth = 1;
+        for(let x=0; x<width; x+=TILE_SIZE) {
+            ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke();
+        }
+        for(let y=0; y<height; y+=TILE_SIZE) {
+            ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke();
+        }
+
+        // // Load office.jpg
+        // const officeImage = new Image();
+        // officeImage.src = './office.jpg';
+        // ctx.drawImage(officeImage, 0, 0, width, height);
+        // // Prevent aspect ratio distortion by drawing only when loaded
+        // officeImage.onload = () => {
+        //     ctx.drawImage(officeImage, 0, 0, width, height);
+        // };
+
+
+        // Draw Zones
+        drawZone(ZONES.SERVER_ROOM, '#2d3748', '#4a5568');
+        drawZone(ZONES.MEETING_ROOM, '#4a5568', '#718096');
+        drawZone(ZONES.DESK_SCIENTIST, '#2c5282', '#60a5fa');
+        drawZone(ZONES.DESK_PARAM, '#744210', '#ecc94b');
+        drawZone(ZONES.DESK_LEAKAGE, '#742a2a', '#fc8181');
+        drawZone(ZONES.WORST_RESULTS, '#63171b', '#f56565');
+        drawZone(ZONES.BEST_RESULTS, '#22543d', '#48bb78');
+
+        // Draw Connecting Cables (Cosmetic)
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.moveTo(ZONES.SERVER_ROOM.x + 60, ZONES.SERVER_ROOM.y + 100);
+        ctx.lineTo(ZONES.DESK_SCIENTIST.x + 40, ZONES.DESK_SCIENTIST.y);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.moveTo(ZONES.DESK_SCIENTIST.x + 80, ZONES.DESK_SCIENTIST.y + 30);
+        ctx.lineTo(ZONES.DESK_PARAM.x, ZONES.DESK_PARAM.y + 30);
+        ctx.stroke();
+
+        // Update & Draw Agents
+        agents.forEach(a => {
+            a.update();
+            a.draw(ctx);
+        });
+
+        // Update & Draw Particles
+        particles.forEach((p, index) => {
+            p.update();
+            p.draw(ctx);
+            if (p.life <= 0) particles.splice(index, 1);
+        });
+
+        frame++;
+        requestAnimationFrame(loop);
+    }
+
+    function drawZone(zone, fill, stroke) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(zone.x, zone.y, zone.w, zone.h);
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 2;
+        ctx.strokeRect(zone.x, zone.y, zone.w, zone.h);
+        
+        ctx.fillStyle = '#aaa';
+        ctx.font = '12px Courier New';
+        ctx.fillText(zone.label, zone.x + 10, zone.y + 20);
+
+        // Add furniture detail (simple rectangles)
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(zone.x + 10, zone.y + 30, zone.w - 20, zone.h - 40);
+    }
+
+    init();
+
+</script>
+</body>
+</html>
